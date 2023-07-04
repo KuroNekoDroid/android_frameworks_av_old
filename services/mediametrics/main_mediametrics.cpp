@@ -40,14 +40,5 @@ int main(int argc __unused, char **argv)
     // we add a ".", but discard the path components: we finish with a shorter string
     const size_t origSize = strlen(argv[0]) + 1; // include null termination.
     strlcpy(argv[0], MediaMetricsService::kServiceName, origSize);
-
-    defaultServiceManager()->addService(
-            String16(MediaMetricsService::kServiceName), new MediaMetricsService());
-
-    sp<ProcessState> processState(ProcessState::self());
-    // processState->setThreadPoolMaxThreadCount(8);
-    processState->startThreadPool();
-    IPCThreadState::self()->joinThreadPool();
-
     return EXIT_SUCCESS;
 }
