@@ -69,6 +69,7 @@ cc_library {
         "-Wall",
         "-Wextra",
         "-Werror",
+        "-Os",
     ],
 
     header_libs: [
@@ -101,6 +102,7 @@ cc_library {
         "-Wall",
         "-Werror",
         "-Wextra",
+        "-Os",
     ],
     shared_libs: [
         "liblog",
@@ -120,6 +122,7 @@ cc_library {
         "-Wall",
         "-Wextra",
         "-Werror",
+        "-Os",
     ],
     shared_libs: [
         "liblog",
