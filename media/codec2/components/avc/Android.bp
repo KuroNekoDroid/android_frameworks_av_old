@@ -38,5 +38,6 @@ cc_library {
 
     cflags: [
         "-Wno-unused-variable",
+        "-Os",
     ],
 }

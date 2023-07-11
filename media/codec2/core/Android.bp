@@ -36,6 +36,7 @@ cc_library {
     cflags: [
         "-Wall",
         "-Werror",
+        "-Os",
     ],
 
     header_abi_checker: {

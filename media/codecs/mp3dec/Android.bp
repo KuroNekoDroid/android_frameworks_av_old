@@ -118,6 +118,7 @@ cc_library_static {
     cflags: [
         "-DOSCL_UNUSED_ARG(x)=(void)(x)",
         "-Werror",
+        "-Os",
     ],
 
     target: {
@@ -137,7 +138,7 @@ cc_test {
         "test/mp3reader.cpp",
     ],
 
-    cflags: ["-Wall", "-Werror"],
+    cflags: ["-Wall", "-Werror", "-Os"],
 
     local_include_dirs: [
         "src",

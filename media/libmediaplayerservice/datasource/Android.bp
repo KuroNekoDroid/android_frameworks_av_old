@@ -41,6 +41,7 @@ cc_library_static {
         "-Werror",
         "-Wno-error=deprecated-declarations",
         "-Wall",
+        "-Os",
     ],
 
     sanitize: {

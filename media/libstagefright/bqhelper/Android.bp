@@ -54,7 +54,7 @@ cc_defaults {
         "-Wall",
         "-Wno-unused-parameter",
         "-Wno-documentation",
-        "-O2",
+        "-Os",
     ],
 
     sanitize: {
@@ -92,7 +92,7 @@ cc_library_shared {
             ],
             cflags: [
                 "-DNO_BINDER",
-                "-O2",
+                "-Os",
             ],
         },
     },
@@ -124,6 +124,6 @@ cc_library_shared {
     ],
     cflags: [
         "-DNO_BINDER",
-        "-O2",
+        "-Os",
     ],
 }
