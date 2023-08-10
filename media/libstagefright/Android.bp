@@ -46,7 +46,6 @@ cc_library_static {
     cflags: [
         "-Werror",
         "-Wall",
-        "-Os",
     ],
     sanitize: {
         misc_undefined: [
@@ -79,7 +78,6 @@ cc_library_static {
     cflags: [
         "-Werror",
         "-Wall",
-        "-Os",
     ],
     sanitize: {
         misc_undefined: [
@@ -120,7 +118,6 @@ cc_library_shared {
     cflags: [
         "-Werror",
         "-Wall",
-        "-Os",
     ],
 
     header_libs: [
@@ -186,7 +183,6 @@ cc_library_static {
         "-Werror",
         "-Wno-error=deprecated-declarations",
         "-Wall",
-        "-Os",
     ],
 
     sanitize: {
@@ -205,7 +201,6 @@ cc_library_static {
         linux: {
             cflags: [
                 "-DDISABLE_AUDIO_SYSTEM_OFFLOAD",
-                "-Os",
             ],
         }
     },
@@ -247,7 +242,6 @@ cc_library_shared {
         "-Werror",
         "-Wno-error=deprecated-declarations",
         "-Wall",
-        "-Os",
     ],
 
     sanitize: {
@@ -282,7 +276,6 @@ cc_library_shared {
         "-Wno-multichar",
         "-Werror",
         "-Wall",
-        "-Os",
     ],
 
     sanitize: {
@@ -428,7 +421,6 @@ cc_library {
         "-Werror",
         "-Wno-error=deprecated-declarations",
         "-Wall",
-        "-Os",
     ],
 
     version_script: "exports.lds",
@@ -436,10 +428,7 @@ cc_library {
     product_variables: {
         debuggable: {
             // enable experiments only in userdebug and eng builds
-            cflags: [
-            "-DENABLE_STAGEFRIGHT_EXPERIMENTS",
-            "-Os",
-            ],
+            cflags: ["-DENABLE_STAGEFRIGHT_EXPERIMENTS"],
         },
     },
 

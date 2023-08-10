@@ -21,7 +21,6 @@ cc_test {
     cflags: [
         "-Werror",
         "-Wall",
-        "-Os",
     ],
     compile_multilib: "first",
 

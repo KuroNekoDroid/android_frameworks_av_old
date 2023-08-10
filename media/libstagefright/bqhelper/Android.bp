@@ -54,7 +54,6 @@ cc_defaults {
         "-Wall",
         "-Wno-unused-parameter",
         "-Wno-documentation",
-        "-Os",
     ],
 
     sanitize: {
@@ -92,7 +91,10 @@ cc_library_shared {
             ],
             cflags: [
                 "-DNO_BINDER",
+<<<<<<< HEAD
                 "-Os",
+=======
+>>>>>>> parent of e061ecc710 (Add cflags to fix build error with global -Oz)
             ],
         },
     },
@@ -124,6 +126,9 @@ cc_library_shared {
     ],
     cflags: [
         "-DNO_BINDER",
+<<<<<<< HEAD
         "-Os",
+=======
+>>>>>>> parent of e061ecc710 (Add cflags to fix build error with global -Oz)
     ],
 }
