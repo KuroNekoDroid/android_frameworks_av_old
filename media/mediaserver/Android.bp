@@ -20,6 +20,10 @@ cc_library_static {
     name: "libregistermsext",
     srcs: ["register.cpp"],
 
+    ldflags: [
+        "-Wl,--allow-shlib-undefined",
+    ],
+
     cflags: [
         "-Werror",
         "-Wall",
@@ -30,6 +34,10 @@ cc_binary {
     name: "mediaserver",
 
     srcs: ["main_mediaserver.cpp"],
+
+    ldflags: [
+        "-Wl,--allow-shlib-undefined",
+    ],
 
     shared_libs: [
         "android.hardware.media.omx@1.0",
