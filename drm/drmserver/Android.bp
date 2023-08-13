@@ -34,6 +34,10 @@ license {
 cc_binary {
     name: "drmserver",
 
+    ldflags: [
+        "-Wl,--allow-shlib-undefined",
+    ],
+
     srcs: [
         "main_drmserver.cpp",
         "DrmManager.cpp",
