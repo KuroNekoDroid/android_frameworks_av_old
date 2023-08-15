@@ -58,7 +58,6 @@ cc_library_static {
     cflags: [
         "-Werror",
         "-Wall",
-        "-Os",
     ],
 
     product_variables: {

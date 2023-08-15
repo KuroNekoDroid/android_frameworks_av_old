@@ -31,7 +31,6 @@ cc_library {
     cflags: [
         "-DOSCL_IMPORT_REF=",
         "-DMPEG4",
-        "-Os",
     ],
 }
 
@@ -48,7 +47,6 @@ cc_library {
 
     cflags: [
         "-DOSCL_IMPORT_REF=",
-        "-Os",
     ],
 }
 
@@ -67,7 +65,6 @@ cc_library {
     cflags: [
         "-DMPEG4",
         "-DOSCL_IMPORT_REF=",
-        "-Os",
     ],
 }
 
@@ -84,6 +81,5 @@ cc_library {
 
     cflags: [
         "-DOSCL_IMPORT_REF=",
-        "-Os",
     ],
 }

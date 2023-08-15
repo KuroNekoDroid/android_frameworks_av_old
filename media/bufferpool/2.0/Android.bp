@@ -50,7 +50,6 @@ cc_library {
     double_loadable: true,
     cflags: [
         "-DBUFFERPOOL_CLONE_HANDLES",
-        "-Os",
     ],
 }
 
