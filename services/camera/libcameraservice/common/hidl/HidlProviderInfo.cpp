@@ -388,7 +388,7 @@ HidlProviderInfo::startProviderInterface() {
                   __FUNCTION__,
                   mProviderName.c_str(),
                   linked.description().c_str());
-              mManager->removeProvider(mProviderName);
+              mManager->removeProvider(mProviderInstance);
               return nullptr;
             } else if (!linked) {
               ALOGW("%s: Unable to link to provider '%s' death notifications",
@@ -442,8 +442,7 @@ hardware::Return<void> HidlProviderInfo::torchModeStatusChange(
 }
 
 void HidlProviderInfo::serviceDied(uint64_t cookie,
-        const wp<hidl::base::V1_0::IBase>& who) {
-    (void) who;
+        [[maybe_unused]] const wp<hidl::base::V1_0::IBase>& who) {
     ALOGI("Camera provider '%s' has died; removing it", mProviderInstance.c_str());
     if (cookie != mId) {
         ALOGW("%s: Unexpected serviceDied cookie %" PRIu64 ", expected %" PRIu32,
@@ -625,7 +624,7 @@ HidlProviderInfo::HidlDeviceInfo3::HidlDeviceInfo3(
                 __FUNCTION__, strerror(-res), res);
     }
 
-    if (SessionConfigurationUtils::isUltraHighResolutionSensor(mCameraCharacteristics)) {
+    if (SessionConfigurationUtils::supportsUltraHighResolutionCapture(mCameraCharacteristics)) {
         status_t status = addDynamicDepthTags(/*maxResolution*/true);
         if (OK != status) {
             ALOGE("%s: Failed appending dynamic depth tags for maximum resolution mode: %s (%d)",
@@ -642,6 +641,11 @@ HidlProviderInfo::HidlDeviceInfo3::HidlDeviceInfo3(
     res = addRotateCropTags();
     if (OK != res) {
         ALOGE("%s: Unable to add default SCALER_ROTATE_AND_CROP tags: %s (%d)", __FUNCTION__,
+                strerror(-res), res);
+    }
+    res = addAutoframingTags();
+    if (OK != res) {
+        ALOGE("%s: Unable to add default AUTOFRAMING tags: %s (%d)", __FUNCTION__,
                 strerror(-res), res);
     }
     res = addPreCorrectionActiveArraySize();
@@ -692,6 +696,11 @@ HidlProviderInfo::HidlDeviceInfo3::HidlDeviceInfo3(
     }
 
     mTorchStrengthLevel = 0;
+
+    if (!kEnableLazyHal) {
+        // Save HAL reference indefinitely
+        mSavedInterface = interface;
+    }
 
     queryPhysicalCameraIds();
 
@@ -753,13 +762,6 @@ HidlProviderInfo::HidlDeviceInfo3::HidlDeviceInfo3(
             }
         }
     }
-
-    if (!kEnableLazyHal) {
-        // Save HAL reference indefinitely
-        mSavedInterface = interface;
-    }
-
-
 }
 
 status_t HidlProviderInfo::HidlDeviceInfo3::setTorchMode(bool enabled) {

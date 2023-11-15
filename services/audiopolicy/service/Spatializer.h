@@ -23,9 +23,11 @@
 #include <android/media/SpatializationLevel.h>
 #include <android/media/SpatializationMode.h>
 #include <android/media/SpatializerHeadTrackingMode.h>
+#include <android/media/audio/common/AudioLatencyMode.h>
 #include <audio_utils/SimpleLog.h>
 #include <math.h>
 #include <media/AudioEffect.h>
+#include <media/audiohal/EffectsFactoryHalInterface.h>
 #include <media/VectorRecorder.h>
 #include <media/audiohal/EffectHalInterface.h>
 #include <media/stagefright/foundation/ALooper.h>
@@ -89,11 +91,13 @@ public:
  * spatializer mixer thread is destroyed.
  */
 class Spatializer : public media::BnSpatializer,
+                    public AudioEffect::IAudioEffectCallback,
                     public IBinder::DeathRecipient,
                     private SpatializerPoseController::Listener,
                     public virtual AudioSystem::SupportedLatencyModesCallback {
   public:
-    static sp<Spatializer> create(SpatializerPolicyCallback *callback);
+    static sp<Spatializer> create(SpatializerPolicyCallback* callback,
+                                  const sp<EffectsFactoryHalInterface>& effectsFactoryHal);
 
            ~Spatializer() override;
 
@@ -168,8 +172,9 @@ class Spatializer : public media::BnSpatializer,
 
     static std::string toString(audio_latency_mode_t mode) {
         // We convert to the AIDL type to print (eventually the legacy type will be removed).
-        const auto result = legacy2aidl_audio_latency_mode_t_LatencyMode(mode);
-        return result.has_value() ? media::toString(*result) : "unknown_latency_mode";
+        const auto result = legacy2aidl_audio_latency_mode_t_AudioLatencyMode(mode);
+        return result.has_value() ?
+                media::audio::common::toString(*result) : "unknown_latency_mode";
     }
 
     // If the Spatializer is not created, we send the status for metrics purposes.
@@ -303,7 +308,7 @@ private:
         return NO_ERROR;
     }
 
-    void postFramesProcessedMsg(int frames);
+    virtual void onFramesProcessed(int32_t framesProcessed) override;
 
     /**
      * Checks if head and screen sensors must be actively monitored based on

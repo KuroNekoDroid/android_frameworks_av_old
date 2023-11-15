@@ -34,6 +34,7 @@
 
 #include <android/hardware/cas/native/1.0/IDescrambler.h>
 #include <android/hardware/drm/1.0/types.h>
+#include <android-base/parseint.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <binder/MemoryBase.h>
@@ -52,6 +53,7 @@
 #include <media/stagefright/SurfaceUtils.h>
 #include <media/MediaCodecBuffer.h>
 #include <mediadrm/ICrypto.h>
+#include <server_configurable_flags/get_flags.h>
 #include <system/window.h>
 
 #include "CCodecBufferChannel.h"
@@ -65,6 +67,7 @@ using hardware::hidl_string;
 using hardware::hidl_vec;
 using hardware::fromHeap;
 using hardware::HidlMemory;
+using server_configurable_flags::GetServerConfigurableFlag;
 
 using namespace hardware::cas::V1_0;
 using namespace hardware::cas::native::V1_0;
@@ -75,11 +78,15 @@ using DrmBufferType = hardware::drm::V1_0::BufferType;
 namespace {
 
 constexpr size_t kSmoothnessFactor = 4;
-constexpr size_t kRenderingDepth = 3;
 
 // This is for keeping IGBP's buffer dropping logic in legacy mode other
 // than making it non-blocking. Do not change this value.
 const static size_t kDequeueTimeoutNs = 0;
+
+static bool areRenderMetricsEnabled() {
+    std::string v = GetServerConfigurableFlag("media_native", "render_metrics_enabled", "false");
+    return v == "true";
+}
 
 }  // namespace
 
@@ -147,10 +154,13 @@ CCodecBufferChannel::CCodecBufferChannel(
       mCCodecCallback(callback),
       mFrameIndex(0u),
       mFirstValidFrameIndex(0u),
+      mAreRenderMetricsEnabled(areRenderMetricsEnabled()),
+      mIsSurfaceToDisplay(false),
+      mHasPresentFenceTimes(false),
+      mRenderingDepth(3u),
       mMetaMode(MODE_NONE),
       mInputMetEos(false),
       mSendEncryptedInfoBuffer(false) {
-    mOutputSurface.lock()->maxDequeueBuffers = kSmoothnessFactor + kRenderingDepth;
     {
         Mutexed<Input>::Locked input(mInput);
         input->buffers.reset(new DummyInputBuffers(""));
@@ -165,11 +175,15 @@ CCodecBufferChannel::CCodecBufferChannel(
         Mutexed<Output>::Locked output(mOutput);
         output->outputDelay = 0u;
         output->numSlots = kSmoothnessFactor;
+        output->bounded = false;
     }
     {
         Mutexed<BlockPools>::Locked pools(mBlockPools);
         pools->outputPoolId = C2BlockPool::BASIC_LINEAR;
     }
+    std::string value = GetServerConfigurableFlag("media_native", "ccodec_rendering_depth", "3");
+    android::base::ParseInt(value, &mRenderingDepth);
+    mOutputSurface.lock()->maxDequeueBuffers = kSmoothnessFactor + mRenderingDepth;
 }
 
 CCodecBufferChannel::~CCodecBufferChannel() {
@@ -225,6 +239,9 @@ status_t CCodecBufferChannel::queueInputBufferInternal(
     }
     if (buffer->meta()->findInt32("tunnel-first-frame", &tmp) && tmp) {
         tunnelFirstFrame = true;
+    }
+    if (buffer->meta()->findInt32("decode-only", &tmp) && tmp) {
+        flags |= C2FrameData::FLAG_DROP_FRAME;
     }
     ALOGV("[%s] queueInputBuffer: buffer->size() = %zu", mName, buffer->size());
     std::list<std::unique_ptr<C2Work>> items;
@@ -423,7 +440,8 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
         size_t offset,
         const CryptoPlugin::SubSample *subSamples,
         size_t numSubSamples,
-        const sp<MediaCodecBuffer> &buffer) {
+        const sp<MediaCodecBuffer> &buffer,
+        AString* errorDetailMsg) {
     static const C2MemoryUsage kSecureUsage{C2MemoryUsage::READ_PROTECTED, 0};
     static const C2MemoryUsage kDefaultReadWriteUsage{
         C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
@@ -453,7 +471,6 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
     ssize_t result = -1;
     ssize_t codecDataOffset = 0;
     if (mCrypto) {
-        AString errorDetailMsg;
         int32_t heapSeqNum = getHeapSeqNum(memory);
         hardware::drm::V1_0::SharedBuffer src{(uint32_t)heapSeqNum, offset, size};
         hardware::drm::V1_0::DestinationBuffer dst;
@@ -467,7 +484,7 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
         }
         result = mCrypto->decrypt(
                 key, iv, mode, pattern, src, 0, subSamples, numSubSamples,
-                dst, &errorDetailMsg);
+                dst, errorDetailMsg);
         if (result < 0) {
             ALOGI("[%s] attachEncryptedBuffer: decrypt failed: result = %zd", mName, result);
             return result;
@@ -512,7 +529,9 @@ status_t CCodecBufferChannel::attachEncryptedBuffer(
                     result = (ssize_t)_bytesWritten;
                     detailedError = _detailedError;
                 });
-
+        if (errorDetailMsg) {
+            errorDetailMsg->setTo(detailedError.c_str(), detailedError.size());
+        }
         if (!returnVoid.isOk() || status != CasStatus::OK || result < 0) {
             ALOGI("[%s] descramble failed, trans=%s, status=%d, result=%zd",
                     mName, returnVoid.description().c_str(), status, result);
@@ -720,7 +739,7 @@ void CCodecBufferChannel::feedInputBufferIfAvailableInternal() {
         Mutexed<Output>::Locked output(mOutput);
         if (!output->buffers ||
                 output->buffers->hasPending() ||
-                output->buffers->numActiveSlots() >= output->numSlots) {
+                (!output->bounded && output->buffers->numActiveSlots() >= output->numSlots)) {
             return;
         }
     }
@@ -899,7 +918,7 @@ status_t CCodecBufferChannel::renderOutputBuffer(
     }
 
     // TODO: revisit this after C2Fence implementation.
-    android::IGraphicBufferProducer::QueueBufferInput qbi(
+    IGraphicBufferProducer::QueueBufferInput qbi(
             timestampNs,
             false, // droppable
             dataSpace,
@@ -963,9 +982,9 @@ status_t CCodecBufferChannel::renderOutputBuffer(
     }
     SetMetadataToGralloc4Handle(dataSpace, hdrStaticInfo, hdrDynamicInfo, block.handle());
 
-    // we don't have dirty regions
-    qbi.setSurfaceDamage(Region::INVALID_REGION);
-    android::IGraphicBufferProducer::QueueBufferOutput qbo;
+    qbi.setSurfaceDamage(Region::INVALID_REGION); // we don't have dirty regions
+    qbi.getFrameTimestamps = true; // we need to know when a frame is rendered
+    IGraphicBufferProducer::QueueBufferOutput qbo;
     status_t result = mComponent->queueToOutputSurface(block, qbi, &qbo);
     if (result != OK) {
         ALOGI("[%s] queueBuffer failed: %d", mName, result);
@@ -983,9 +1002,121 @@ status_t CCodecBufferChannel::renderOutputBuffer(
 
     int64_t mediaTimeUs = 0;
     (void)buffer->meta()->findInt64("timeUs", &mediaTimeUs);
-    mCCodecCallback->onOutputFramesRendered(mediaTimeUs, timestampNs);
+    if (mAreRenderMetricsEnabled && mIsSurfaceToDisplay) {
+        trackReleasedFrame(qbo, mediaTimeUs, timestampNs);
+        processRenderedFrames(qbo.frameTimestamps);
+    } else {
+        // When the surface is an intermediate surface, onFrameRendered is triggered immediately
+        // when the frame is queued to the non-display surface
+        mCCodecCallback->onOutputFramesRendered(mediaTimeUs, timestampNs);
+    }
 
     return OK;
+}
+
+void CCodecBufferChannel::initializeFrameTrackingFor(ANativeWindow * window) {
+    mTrackedFrames.clear();
+
+    int isSurfaceToDisplay = 0;
+    window->query(window, NATIVE_WINDOW_QUEUES_TO_WINDOW_COMPOSER, &isSurfaceToDisplay);
+    mIsSurfaceToDisplay = isSurfaceToDisplay == 1;
+    // No frame tracking is needed if we're not sending frames to the display
+    if (!mIsSurfaceToDisplay) {
+        // Return early so we don't call into SurfaceFlinger (requiring permissions)
+        return;
+    }
+
+    int hasPresentFenceTimes = 0;
+    window->query(window, NATIVE_WINDOW_FRAME_TIMESTAMPS_SUPPORTS_PRESENT, &hasPresentFenceTimes);
+    mHasPresentFenceTimes = hasPresentFenceTimes == 1;
+    if (!mHasPresentFenceTimes) {
+        ALOGI("Using latch times for frame rendered signals - present fences not supported");
+    }
+}
+
+void CCodecBufferChannel::trackReleasedFrame(const IGraphicBufferProducer::QueueBufferOutput& qbo,
+                                             int64_t mediaTimeUs, int64_t desiredRenderTimeNs) {
+    // If the render time is earlier than now, then we're suggesting it should be rendered ASAP,
+    // so track the frame as if the desired render time is now.
+    int64_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
+    if (desiredRenderTimeNs < nowNs) {
+        desiredRenderTimeNs = nowNs;
+    }
+    // We've just queued a frame to the surface, so keep track of it and later check to see if it is
+    // actually rendered.
+    TrackedFrame frame;
+    frame.number = qbo.nextFrameNumber - 1;
+    frame.mediaTimeUs = mediaTimeUs;
+    frame.desiredRenderTimeNs = desiredRenderTimeNs;
+    frame.latchTime = -1;
+    frame.presentFence = nullptr;
+    mTrackedFrames.push_back(frame);
+}
+
+void CCodecBufferChannel::processRenderedFrames(const FrameEventHistoryDelta& deltas) {
+    // Grab the latch times and present fences from the frame event deltas
+    for (const auto& delta : deltas) {
+        for (auto& frame : mTrackedFrames) {
+            if (delta.getFrameNumber() == frame.number) {
+                delta.getLatchTime(&frame.latchTime);
+                delta.getDisplayPresentFence(&frame.presentFence);
+            }
+        }
+    }
+
+    // Scan all frames and check to see if the frames that SHOULD have been rendered by now, have,
+    // in fact, been rendered.
+    int64_t nowNs = systemTime(SYSTEM_TIME_MONOTONIC);
+    while (!mTrackedFrames.empty()) {
+        TrackedFrame & frame = mTrackedFrames.front();
+        // Frames that should have been rendered at least 100ms in the past are checked
+        if (frame.desiredRenderTimeNs > nowNs - 100*1000*1000LL) {
+            break;
+        }
+
+        // If we don't have a render time by now, then consider the frame as dropped
+        int64_t renderTimeNs = getRenderTimeNs(frame);
+        if (renderTimeNs != -1) {
+            mCCodecCallback->onOutputFramesRendered(frame.mediaTimeUs, renderTimeNs);
+        }
+        mTrackedFrames.pop_front();
+    }
+}
+
+int64_t CCodecBufferChannel::getRenderTimeNs(const TrackedFrame& frame) {
+    // If the device doesn't have accurate present fence times, then use the latch time as a proxy
+    if (!mHasPresentFenceTimes) {
+        if (frame.latchTime == -1) {
+            ALOGD("no latch time for frame %d", (int) frame.number);
+            return -1;
+        }
+        return frame.latchTime;
+    }
+
+    if (frame.presentFence == nullptr) {
+        ALOGW("no present fence for frame %d", (int) frame.number);
+        return -1;
+    }
+
+    nsecs_t actualRenderTimeNs = frame.presentFence->getSignalTime();
+
+    if (actualRenderTimeNs == Fence::SIGNAL_TIME_INVALID) {
+        ALOGW("invalid signal time for frame %d", (int) frame.number);
+        return -1;
+    }
+
+    if (actualRenderTimeNs == Fence::SIGNAL_TIME_PENDING) {
+        ALOGD("present fence has not fired for frame %d", (int) frame.number);
+        return -1;
+    }
+
+    return actualRenderTimeNs;
+}
+
+void CCodecBufferChannel::pollForRenderedBuffers() {
+    FrameEventHistoryDelta delta;
+    mComponent->pollForRenderedFrames(&delta);
+    processRenderedFrames(delta);
 }
 
 status_t CCodecBufferChannel::discardBuffer(const sp<MediaCodecBuffer> &buffer) {
@@ -1267,7 +1398,7 @@ status_t CCodecBufferChannel::start(
         {
             Mutexed<OutputSurface>::Locked output(mOutputSurface);
             maxDequeueCount = output->maxDequeueBuffers = numOutputSlots +
-                    reorderDepth.value + kRenderingDepth;
+                    reorderDepth.value + mRenderingDepth;
             outputSurface = output->surface ?
                     output->surface->getIGraphicBufferProducer() : nullptr;
             if (outputSurface) {
@@ -1390,6 +1521,7 @@ status_t CCodecBufferChannel::start(
         Mutexed<Output>::Locked output(mOutput);
         output->outputDelay = outputDelayValue;
         output->numSlots = numOutputSlots;
+        output->bounded = bool(outputSurface);
         if (graphic) {
             if (outputSurface || !buffersBoundToCodec) {
                 output->buffers.reset(new GraphicOutputBuffers(mName));
@@ -1612,6 +1744,8 @@ void CCodecBufferChannel::reset() {
         Mutexed<Output>::Locked output(mOutput);
         output->buffers.reset();
     }
+    // reset the frames that are being tracked for onFrameRendered callbacks
+    mTrackedFrames.clear();
 }
 
 void CCodecBufferChannel::release() {
@@ -1932,7 +2066,7 @@ bool CCodecBufferChannel::handleWork(
         {
             Mutexed<OutputSurface>::Locked output(mOutputSurface);
             maxDequeueCount = output->maxDequeueBuffers =
-                    numOutputSlots + reorderDepth + kRenderingDepth;
+                    numOutputSlots + reorderDepth + mRenderingDepth;
             if (output->surface) {
                 output->surface->setMaxDequeuedBufferCount(output->maxDequeueBuffers);
             }
@@ -1973,7 +2107,10 @@ bool CCodecBufferChannel::handleWork(
     // csd cannot be re-ordered and will always arrive first.
     if (initData != nullptr) {
         Mutexed<Output>::Locked output(mOutput);
-        if (output->buffers && outputFormat) {
+        if (!output->buffers) {
+            return false;
+        }
+        if (outputFormat) {
             output->buffers->updateSkipCutBuffer(outputFormat);
             output->buffers->setFormat(outputFormat);
         }
@@ -1982,12 +2119,15 @@ bool CCodecBufferChannel::handleWork(
         }
         size_t index;
         sp<MediaCodecBuffer> outBuffer;
-        if (output->buffers && output->buffers->registerCsd(initData, &index, &outBuffer) == OK) {
+        if (output->buffers->registerCsd(initData, &index, &outBuffer) == OK) {
             outBuffer->meta()->setInt64("timeUs", timestamp.peek());
             outBuffer->meta()->setInt32("flags", BUFFER_FLAG_CODEC_CONFIG);
             ALOGV("[%s] onWorkDone: csd index = %zu [%p]", mName, index, outBuffer.get());
 
-            output.unlock();
+            // TRICKY: we want popped buffers reported in order, so sending
+            // the callback while holding the lock here. This assumes that
+            // onOutputBufferAvailable() does not block. onOutputBufferAvailable()
+            // callbacks are always sent with the Output lock held.
             mCallback->onOutputBufferAvailable(index, outBuffer);
         } else {
             ALOGD("[%s] onWorkDone: unable to register csd", mName);
@@ -2001,6 +2141,12 @@ bool CCodecBufferChannel::handleWork(
     if (worklet->output.flags & C2FrameData::FLAG_DROP_FRAME) {
         ALOGV("[%s] onWorkDone: drop buffer but keep metadata", mName);
         drop = true;
+    }
+
+    // Workaround: if C2FrameData::FLAG_DROP_FRAME is not implemented in
+    // HAL, the flag is then removed in the corresponding output buffer.
+    if (work->input.flags & C2FrameData::FLAG_DROP_FRAME) {
+        flags |= BUFFER_FLAG_DECODE_ONLY;
     }
 
     if (notifyClient && !buffer && !flags) {
@@ -2071,7 +2217,10 @@ void CCodecBufferChannel::sendOutputBuffers() {
         case OutputBuffers::DISCARD:
             break;
         case OutputBuffers::NOTIFY_CLIENT:
-            output.unlock();
+            // TRICKY: we want popped buffers reported in order, so sending
+            // the callback while holding the lock here. This assumes that
+            // onOutputBufferAvailable() does not block. onOutputBufferAvailable()
+            // callbacks are always sent with the Output lock held.
             mCallback->onOutputBufferAvailable(index, outBuffer);
             break;
         case OutputBuffers::REALLOCATE:
@@ -2153,6 +2302,7 @@ status_t CCodecBufferChannel::setSurface(const sp<Surface> &newSurface, bool pus
         Mutexed<OutputSurface>::Locked output(mOutputSurface);
         output->surface = newSurface;
         output->generation = generation;
+        initializeFrameTrackingFor(static_cast<ANativeWindow *>(newSurface.get()));
     }
 
     if (oldSurface && pushBlankBuffer) {

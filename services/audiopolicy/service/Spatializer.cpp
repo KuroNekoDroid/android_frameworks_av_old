@@ -30,7 +30,6 @@
 #include <audio_utils/fixedfft.h>
 #include <cutils/bitops.h>
 #include <hardware/sensors.h>
-#include <media/audiohal/EffectsFactoryHalInterface.h>
 #include <media/stagefright/foundation/AHandler.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/MediaMetricsItem.h>
@@ -215,18 +214,17 @@ const std::vector<const char *> Spatializer::sHeadPoseKeys = {
 };
 
 // ---------------------------------------------------------------------------
-sp<Spatializer> Spatializer::create(SpatializerPolicyCallback *callback) {
+sp<Spatializer> Spatializer::create(SpatializerPolicyCallback* callback,
+                                    const sp<EffectsFactoryHalInterface>& effectsFactoryHal) {
     sp<Spatializer> spatializer;
 
-    sp<EffectsFactoryHalInterface> effectsFactoryHal = EffectsFactoryHalInterface::create();
     if (effectsFactoryHal == nullptr) {
         ALOGW("%s failed to create effect factory interface", __func__);
         return spatializer;
     }
 
     std::vector<effect_descriptor_t> descriptors;
-    status_t status =
-            effectsFactoryHal->getDescriptors(FX_IID_SPATIALIZER, &descriptors);
+    status_t status = effectsFactoryHal->getDescriptors(FX_IID_SPATIALIZER, &descriptors);
     if (status != NO_ERROR) {
         ALOGW("%s failed to get spatializer descriptor, error %d", __func__, status);
         return spatializer;
@@ -867,9 +865,10 @@ status_t Spatializer::attachOutput(audio_io_handle_t output, size_t numActiveTra
         // create FX instance on output
         AttributionSourceState attributionSource = AttributionSourceState();
         mEngine = new AudioEffect(attributionSource);
-        mEngine->set(nullptr, &mEngineDescriptor.uuid, 0, Spatializer::engineCallback /* cbf */,
-                     this /* user */, AUDIO_SESSION_OUTPUT_STAGE, output, {} /* device */,
-                     false /* probe */, true /* notifyFramesProcessed */);
+        mEngine->set(nullptr /* type */, &mEngineDescriptor.uuid, 0 /* priority */,
+                     wp<AudioEffect::IAudioEffectCallback>::fromExisting(this),
+                     AUDIO_SESSION_OUTPUT_STAGE, output, {} /* device */, false /* probe */,
+                     true /* notifyFramesProcessed */);
         status_t status = mEngine->initCheck();
         ALOGV("%s mEngine create status %d", __func__, (int)status);
         if (status != NO_ERROR) {
@@ -1047,27 +1046,10 @@ void Spatializer::calculateHeadPose() {
     }
 }
 
-void Spatializer::engineCallback(int32_t event, void *user, void *info) {
-    if (user == nullptr) {
-        return;
-    }
-    Spatializer* const me = reinterpret_cast<Spatializer *>(user);
-    switch (event) {
-        case AudioEffect::EVENT_FRAMES_PROCESSED: {
-            int frames = info == nullptr ? 0 : *(int*)info;
-            ALOGV("%s frames processed %d for me %p", __func__, frames, me);
-            me->postFramesProcessedMsg(frames);
-        } break;
-        default:
-            ALOGV("%s event %d", __func__, event);
-            break;
-    }
-}
-
-void Spatializer::postFramesProcessedMsg(int frames) {
+void Spatializer::onFramesProcessed(int32_t framesProcessed) {
     sp<AMessage> msg =
             new AMessage(EngineCallbackHandler::kWhatOnFramesProcessed, mHandler);
-    msg->setInt32(EngineCallbackHandler::kNumFramesKey, frames);
+    msg->setInt32(EngineCallbackHandler::kNumFramesKey, framesProcessed);
     msg->post();
 }
 

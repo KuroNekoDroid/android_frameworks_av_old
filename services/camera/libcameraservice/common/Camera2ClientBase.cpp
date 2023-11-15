@@ -37,7 +37,6 @@
 #include "device3/aidl/AidlCamera3Device.h"
 #include "device3/hidl/HidlCamera3Device.h"
 #include "utils/CameraThreadState.h"
-#include "utils/CameraServiceProxyWrapper.h"
 
 namespace android {
 
@@ -49,6 +48,7 @@ template <typename TClientBase>
 Camera2ClientBase<TClientBase>::Camera2ClientBase(
         const sp<CameraService>& cameraService,
         const sp<TCamCallbacks>& remoteCallback,
+        std::shared_ptr<CameraServiceProxyWrapper> cameraServiceProxyWrapper,
         const String16& clientPackageName,
         bool systemNativeClient,
         const std::optional<String16>& clientFeatureId,
@@ -66,6 +66,7 @@ Camera2ClientBase<TClientBase>::Camera2ClientBase(
                 clientFeatureId, cameraId, api1CameraId, cameraFacing, sensorOrientation, clientPid,
                 clientUid, servicePid, overrideToPortrait),
         mSharedCameraCallbacks(remoteCallback),
+        mCameraServiceProxyWrapper(cameraServiceProxyWrapper),
         mDeviceActive(false), mApi1CameraId(api1CameraId)
 {
     ALOGI("Camera %s: Opened. Client: %s (PID %d, UID %d)", cameraId.string(),
@@ -103,11 +104,6 @@ status_t Camera2ClientBase<TClientBase>::initializeImpl(TProviderPtr providerPtr
           TClientBase::mCameraIdStr.string());
     status_t res;
 
-    // Verify ops permissions
-    res = TClientBase::startCameraOps();
-    if (res != OK) {
-        return res;
-    }
     IPCTransport providerTransport = IPCTransport::INVALID;
     res = providerPtr->getCameraIdIPCTransport(TClientBase::mCameraIdStr.string(),
             &providerTransport);
@@ -117,12 +113,14 @@ status_t Camera2ClientBase<TClientBase>::initializeImpl(TProviderPtr providerPtr
     switch (providerTransport) {
         case IPCTransport::HIDL:
             mDevice =
-                    new HidlCamera3Device(TClientBase::mCameraIdStr, mOverrideForPerfClass,
+                    new HidlCamera3Device(mCameraServiceProxyWrapper,
+                            TClientBase::mCameraIdStr, mOverrideForPerfClass,
                             TClientBase::mOverrideToPortrait, mLegacyClient);
             break;
         case IPCTransport::AIDL:
             mDevice =
-                    new AidlCamera3Device(TClientBase::mCameraIdStr, mOverrideForPerfClass,
+                    new AidlCamera3Device(mCameraServiceProxyWrapper,
+                            TClientBase::mCameraIdStr, mOverrideForPerfClass,
                             TClientBase::mOverrideToPortrait, mLegacyClient);
              break;
         default:
@@ -143,12 +141,30 @@ status_t Camera2ClientBase<TClientBase>::initializeImpl(TProviderPtr providerPtr
         return res;
     }
 
+    // Verify ops permissions
+    res = TClientBase::startCameraOps();
+    if (res != OK) {
+        TClientBase::finishCameraOps();
+        return res;
+    }
+
     wp<NotificationListener> weakThis(this);
     res = mDevice->setNotifyCallback(weakThis);
+    if (res != OK) {
+        ALOGE("%s: Camera %s: Unable to set notify callback: %s (%d)",
+                __FUNCTION__, TClientBase::mCameraIdStr.string(), strerror(-res), res);
+        return res;
+    }
 
     /** Start watchdog thread */
-    mCameraServiceWatchdog = new CameraServiceWatchdog();
-    mCameraServiceWatchdog->run("Camera2ClientBaseWatchdog");
+    mCameraServiceWatchdog = new CameraServiceWatchdog(TClientBase::mCameraIdStr,
+            mCameraServiceProxyWrapper);
+    res = mCameraServiceWatchdog->run("Camera2ClientBaseWatchdog");
+    if (res != OK) {
+        ALOGE("%s: Unable to start camera service watchdog thread: %s (%d)",
+                __FUNCTION__, strerror(-res), res);
+        return res;
+    }
 
     return OK;
 }
@@ -166,8 +182,8 @@ Camera2ClientBase<TClientBase>::~Camera2ClientBase() {
         mCameraServiceWatchdog.clear();
     }
 
-    ALOGI("Closed Camera %s. Client was: %s (PID %d, UID %u)",
-            TClientBase::mCameraIdStr.string(),
+    ALOGI("%s: Client object's dtor for Camera Id %s completed. Client was: %s (PID %d, UID %u)",
+            __FUNCTION__, TClientBase::mCameraIdStr.string(),
             String8(TClientBase::mClientPackageName).string(),
             mInitialClientPid, TClientBase::mClientUid);
 }
@@ -374,7 +390,7 @@ status_t Camera2ClientBase<TClientBase>::notifyActive(float maxPreviewFps) {
                     TClientBase::mCameraIdStr.string(), res);
             return res;
         }
-        CameraServiceProxyWrapper::logActive(TClientBase::mCameraIdStr, maxPreviewFps);
+        mCameraServiceProxyWrapper->logActive(TClientBase::mCameraIdStr, maxPreviewFps);
     }
     mDeviceActive = true;
 
@@ -393,7 +409,7 @@ void Camera2ClientBase<TClientBase>::notifyIdleWithUserTag(
             ALOGE("%s: Camera %s: Error finishing streaming ops: %d", __FUNCTION__,
                     TClientBase::mCameraIdStr.string(), res);
         }
-        CameraServiceProxyWrapper::logIdle(TClientBase::mCameraIdStr,
+        mCameraServiceProxyWrapper->logIdle(TClientBase::mCameraIdStr,
                 requestCount, resultErrorCount, deviceError, userTag, videoStabilizationMode,
                 streamStats);
     }
@@ -403,50 +419,38 @@ void Camera2ClientBase<TClientBase>::notifyIdleWithUserTag(
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyShutter(const CaptureResultExtras& resultExtras,
-                                                   nsecs_t timestamp) {
-    (void)resultExtras;
-    (void)timestamp;
-
+void Camera2ClientBase<TClientBase>::notifyShutter(
+                [[maybe_unused]] const CaptureResultExtras& resultExtras,
+                [[maybe_unused]] nsecs_t timestamp) {
     ALOGV("%s: Shutter notification for request id %" PRId32 " at time %" PRId64,
             __FUNCTION__, resultExtras.requestId, timestamp);
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyAutoFocus(uint8_t newState,
-                                                     int triggerId) {
-    (void)newState;
-    (void)triggerId;
-
+void Camera2ClientBase<TClientBase>::notifyAutoFocus([[maybe_unused]] uint8_t newState,
+                                                     [[maybe_unused]] int triggerId) {
     ALOGV("%s: Autofocus state now %d, last trigger %d",
           __FUNCTION__, newState, triggerId);
 
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyAutoExposure(uint8_t newState,
-                                                        int triggerId) {
-    (void)newState;
-    (void)triggerId;
-
+void Camera2ClientBase<TClientBase>::notifyAutoExposure([[maybe_unused]] uint8_t newState,
+                                                        [[maybe_unused]] int triggerId) {
     ALOGV("%s: Autoexposure state now %d, last trigger %d",
             __FUNCTION__, newState, triggerId);
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyAutoWhitebalance(uint8_t newState,
-                                                            int triggerId) {
-    (void)newState;
-    (void)triggerId;
-
+void Camera2ClientBase<TClientBase>::notifyAutoWhitebalance(
+                [[maybe_unused]] uint8_t newState,
+                [[maybe_unused]] int triggerId) {
     ALOGV("%s: Auto-whitebalance state now %d, last trigger %d",
             __FUNCTION__, newState, triggerId);
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyPrepared(int streamId) {
-    (void)streamId;
-
+void Camera2ClientBase<TClientBase>::notifyPrepared([[maybe_unused]] int streamId) {
     ALOGV("%s: Stream %d now prepared",
             __FUNCTION__, streamId);
 }
@@ -458,9 +462,8 @@ void Camera2ClientBase<TClientBase>::notifyRequestQueueEmpty() {
 }
 
 template <typename TClientBase>
-void Camera2ClientBase<TClientBase>::notifyRepeatingRequestError(long lastFrameNumber) {
-    (void)lastFrameNumber;
-
+void Camera2ClientBase<TClientBase>::notifyRepeatingRequestError(
+            [[maybe_unused]] long lastFrameNumber) {
     ALOGV("%s: Repeating request was stopped. Last frame number is %ld",
             __FUNCTION__, lastFrameNumber);
 }

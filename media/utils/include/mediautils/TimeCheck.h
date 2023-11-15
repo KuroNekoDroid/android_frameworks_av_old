@@ -123,7 +123,6 @@ class TimeCheck {
         const Duration secondChanceDuration;
         const std::chrono::system_clock::time_point startSystemTime;
         const pid_t tid;
-
         void onCancel(TimerThread::Handle handle) const;
         void onTimeout(TimerThread::Handle handle) const;
     };
@@ -147,5 +146,10 @@ class TimeCheck {
 // obtained from getStatisticsForClass(className).
 TimeCheck makeTimeCheckStatsForClassMethod(
         std::string_view className, std::string_view methodName);
+
+// A handy statement-like macro to put at the beginning of almost every method
+// which calls into HAL. Note that it requires the class to implement 'getClassName'.
+#define TIME_CHECK() auto timeCheck = \
+            mediautils::makeTimeCheckStatsForClassMethod(getClassName(), __func__)
 
 }  // namespace android::mediautils

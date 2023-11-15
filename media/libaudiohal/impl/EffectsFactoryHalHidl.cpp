@@ -31,9 +31,13 @@
 #include "EffectHalHidl.h"
 #include "EffectsFactoryHalHidl.h"
 
+#include "android/media/AudioHalVersion.h"
+
+using ::android::base::unexpected;
+using ::android::detail::AudioHalVersionInfo;
+using ::android::hardware::Return;
 using ::android::hardware::audio::common::CPP_VERSION::implementation::UuidUtils;
 using ::android::hardware::audio::effect::CPP_VERSION::implementation::EffectUtils;
-using ::android::hardware::Return;
 
 namespace android {
 namespace effect {
@@ -75,9 +79,11 @@ EffectDescriptorCache::QueryResult EffectDescriptorCache::queryAllDescriptors(
 }
 
 EffectsFactoryHalHidl::EffectsFactoryHalHidl(sp<IEffectsFactory> effectsFactory)
-        : EffectConversionHelperHidl("EffectsFactory"), mCache(new EffectDescriptorCache) {
-    ALOG_ASSERT(effectsFactory != nullptr, "Provided IEffectsFactory service is NULL");
-    mEffectsFactory = effectsFactory;
+    : EffectConversionHelperHidl("EffectsFactory"),
+      mEffectsFactory(std::move(effectsFactory)),
+      mCache(new EffectDescriptorCache),
+      mParsingResult(effectsConfig::parse()) {
+    ALOG_ASSERT(mEffectsFactory != nullptr, "Provided IEffectsFactory service is NULL");
 }
 
 status_t EffectsFactoryHalHidl::queryNumberEffects(uint32_t *pNumEffects) {
@@ -221,11 +227,26 @@ status_t EffectsFactoryHalHidl::mirrorBuffer(void* external, size_t size,
     return EffectBufferHalHidl::mirror(external, size, buffer);
 }
 
+AudioHalVersionInfo EffectsFactoryHalHidl::getHalVersion() const {
+    return AudioHalVersionInfo(AudioHalVersionInfo::Type::HIDL, MAJOR_VERSION, MINOR_VERSION);
+}
+
+std::shared_ptr<const effectsConfig::Processings> EffectsFactoryHalHidl::getProcessings() const {
+    return mParsingResult.parsedConfig;
+}
+
+::android::error::Result<size_t> EffectsFactoryHalHidl::getSkippedElements() const {
+    if (!mParsingResult.parsedConfig) {
+        return ::android::base::unexpected(BAD_VALUE);
+    }
+    return mParsingResult.nbSkippedElement;
+}
+
 } // namespace effect
 
 // When a shared library is built from a static library, even explicit
 // exports from a static library are optimized out unless actually used by
-// the shared library. See EffectsFactoryHalHidlEntry.cpp.
+// the shared library. See EffectsFactoryHalEntry.cpp.
 extern "C" void* createIEffectsFactoryImpl() {
     auto service = hardware::audio::effect::CPP_VERSION::IEffectsFactory::getService();
     return service ? new effect::EffectsFactoryHalHidl(service) : nullptr;
