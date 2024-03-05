@@ -6625,7 +6625,6 @@ DeviceVector AudioPolicyManager::getNewOutputDevices(const sp<SwAudioOutputDescr
 
     for (const auto &productStrategy : mEngine->getOrderedProductStrategies()) {
         StreamTypeVector streams = mEngine->getStreamTypesForProductStrategy(productStrategy);
-        auto attr = mEngine->getAllAttributesForProductStrategy(productStrategy).front();
         auto hasStreamActive = [&](auto stream) {
             return hasStream(streams, stream) && isStreamActive(stream, 0);
         };
@@ -6650,6 +6649,7 @@ DeviceVector AudioPolicyManager::getNewOutputDevices(const sp<SwAudioOutputDescr
                 mOutputs.isStrategyActiveOnSameModule(productStrategy, outputDesc))) {
             // Retrieval of devices for voice DL is done on primary output profile, cannot
             // check the route (would force modifying configuration file for this profile)
+            auto attr = mEngine->getAllAttributesForProductStrategy(productStrategy).front();
             devices = mEngine->getOutputDevicesForAttributes(attr, nullptr, fromCache);
             break;
         }
